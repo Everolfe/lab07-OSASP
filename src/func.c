@@ -8,6 +8,7 @@ void clear_input() {
 
 void menu(void) {
     record_t current_record;
+    record_t edited_record;
     int record_index = -1;
     char ch;
 
@@ -17,7 +18,8 @@ void menu(void) {
             "Select an action:\n"
             "l - LST\n"
             "g - GET\n"
-            "p - PUT\n"
+            "e - EDIT\n"
+            "s - SAVE\n"
             "q - QUIT\n"
             "==========================\n");
         printf("Command: ");
@@ -33,40 +35,56 @@ void menu(void) {
             case 'g':
                 printf("Enter the record number: ");
                 scanf("%d", &record_index);
-                print_record(record_index);
-                break;
-            case 'p':
-                if (record_index == -1) {
-                    printf("Get the record with the GET option before using the PUT option.\n");
+                clear_input();
+                if (record_index < 0 || record_index >= MAX_RECORDS) {
+                    printf("Invalid record index. Must be between 0 and %d\n", MAX_RECORDS-1);
                     break;
                 }
-                record_t new_record;
-
-                memset(&new_record, 0, sizeof(new_record));
-                
                 get_record(record_index, &current_record);
-            
-                printf("Enter the new name for the record: ");
-                scanf("%s", new_record.name);
-
-                printf("Enter the new address for the record: ");
-                scanf("%s", new_record.address);
-
-                printf("Enter the new semester for the record: ");
-                scanf("%d", &new_record.semester);
-
-                save_record(&current_record, &new_record, record_index);
+                memcpy(&edited_record, &current_record, sizeof(record_t));
+                printf("Record %d loaded for editing.\n", record_index);
+                print_record(record_index);
+                break;
+            case 'e':
+                if (record_index == -1) {
+                    printf("First get a record with the GET option before editing.\n");
+                    break;
+                }
+                
+                printf("Editing record %d:\n", record_index);
+                printf("Current name (%s): ", edited_record.name);
+                fgets(edited_record.name, sizeof(edited_record.name), stdin);
+                edited_record.name[strcspn(edited_record.name, "\n")] = '\0';
+                
+                printf("Current address (%s): ", edited_record.address);
+                fgets(edited_record.address, sizeof(edited_record.address), stdin);
+                edited_record.address[strcspn(edited_record.address, "\n")] = '\0';
+                
+                printf("Current semester (%d): ", edited_record.semester);
+                char sem_str[10];
+                fgets(sem_str, sizeof(sem_str), stdin);
+                if (strlen(sem_str) > 0) {
+                    edited_record.semester = atoi(sem_str);
+                }
+                
+                printf("Record edited (not saved yet).\n");
+                break;
+            case 's':
+                if (record_index == -1) {
+                    printf("No record loaded for saving.\n");
+                    break;
+                }
+                save_record(&current_record, &edited_record, record_index);
+                // After save, update current_record to match edited_record
+                memcpy(&current_record, &edited_record, sizeof(record_t));
                 break;
             case 'q':
                 IN_PROGRESS = false;
                 break;
             default:
                 printf("Wrong command\n");
-                fflush(stdin);
                 break;
-
         }
-        getchar();
     } while (IN_PROGRESS);
 }
 
@@ -170,14 +188,7 @@ void get_record(int record_index, record_t *record) {
     }
 }
 
-void modify_record(int record_index, record_t *record) {
-    off_t offset = record_index * sizeof(*record);
-    lseek(fd, offset, SEEK_SET);
-
-    write(fd, record, sizeof(*record));
-}
-
-void save_record(record_t *record, record_t *new_record, int record_index) {
+void save_record(record_t *original_record, record_t *new_record, int record_index) {
     if (record_index < 0 || record_index >= MAX_RECORDS) {
         printf("Invalid record number.\n");
         return;
@@ -187,8 +198,8 @@ void save_record(record_t *record, record_t *new_record, int record_index) {
         struct flock fl = {0};
         fl.l_type = F_WRLCK;
         fl.l_whence = SEEK_SET;
-        fl.l_start = record_index * sizeof(*record);
-        fl.l_len = sizeof(*record);
+        fl.l_start = record_index * sizeof(*new_record);
+        fl.l_len = sizeof(*new_record);
 
         printf("Trying to acquire write lock for record %d...\n", record_index);
         if (fcntl(fd, F_SETLKW, &fl) == -1) {
@@ -197,9 +208,7 @@ void save_record(record_t *record, record_t *new_record, int record_index) {
         }
         printf("Write lock acquired for record %d.\n", record_index);
 
-        // Имитация длительной работы
-        sleep(5);
-
+        // Проверяем, не изменилась ли запись с момента чтения
         record_t current_record;
         lseek(fd, record_index * sizeof(current_record), SEEK_SET);
         if (read(fd, &current_record, sizeof(current_record)) != sizeof(current_record)) {
@@ -209,25 +218,25 @@ void save_record(record_t *record, record_t *new_record, int record_index) {
             return;
         }
 
-        if (memcmp(&current_record, record, sizeof(record_t)) != 0) {
+        if (memcmp(&current_record, original_record, sizeof(record_t)) != 0) {
             printf("WARNING: Record %d was modified by another process.\n", record_index);
             printf("Current contents:\n");
             printf("Name: %s\n", current_record.name);
             printf("Address: %s\n", current_record.address);
             printf("Semester: %d\n", current_record.semester);
-            printf("Your modified record was NOT saved.\n");
+            printf("Your changes were NOT saved.\n");
 
             fl.l_type = F_UNLCK;
             fcntl(fd, F_SETLK, &fl);
 
             char answer;
-            printf("Do you want to retry saving with updated data? (y/n): ");
+            printf("Do you want to retry saving? (y/n): ");
             scanf(" %c", &answer);
             clear_input();
 
             if (answer == 'y' || answer == 'Y') {
-                // Обновляем локальную копию исходной записи
-                memcpy(record, &current_record, sizeof(record_t));
+                // Обновляем оригинальную запись
+                memcpy(original_record, &current_record, sizeof(record_t));
                 continue;  // повторяем попытку сохранения
             } else {
                 printf("Save operation aborted by user.\n");
@@ -235,6 +244,7 @@ void save_record(record_t *record, record_t *new_record, int record_index) {
             }
         }
 
+        // Сохраняем изменения
         lseek(fd, record_index * sizeof(current_record), SEEK_SET);
         if (write(fd, new_record, sizeof(*new_record)) != sizeof(*new_record)) {
             perror("write");
@@ -248,12 +258,9 @@ void save_record(record_t *record, record_t *new_record, int record_index) {
             exit(EXIT_FAILURE);
         }
         printf("Write lock released for record %d.\n", record_index);
-        break; // сохранение прошло успешно
+        break;
     }
 }
-
-
-
 
 void fill_file(int fd) {
     record_t arrayRecords[MAX_RECORDS];
